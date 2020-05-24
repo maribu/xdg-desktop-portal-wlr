@@ -110,7 +110,7 @@ int main(int argc, char *argv[]) {
 		goto error;
 	}
 
-	ret = sd_bus_request_name(bus, service_name, 0);
+	ret = sd_bus_request_name(bus, service_name, SD_BUS_NAME_REPLACE_EXISTING | SD_BUS_NAME_ALLOW_REPLACEMENT);
 	if (ret < 0) {
 		logprint(ERROR, "dbus: failed to acquire service name: %s", strerror(-ret));
 		goto error;
