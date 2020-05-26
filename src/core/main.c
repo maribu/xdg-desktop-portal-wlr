@@ -5,6 +5,9 @@
 #include <poll.h>
 #include <pipewire/pipewire.h>
 #include <spa/utils/result.h>
+#include <sys/file.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include "xdpw.h"
 #include "logger.h"
 
@@ -29,6 +32,61 @@ static int xdpw_usage(FILE* stream, int rc) {
 
 	fprintf(stream, "%s", usage);
 	return rc;
+}
+
+static int open_pidfd(void) {
+	char filename[256];
+	const char *prefix = getenv("XDG_RUNTIME_DIR");
+	static const char pidfdname[] = "/xdpw.pid";
+	if (!prefix) prefix = "/tmp";
+	size_t prefix_len = strlen(prefix);
+
+	if (prefix_len + sizeof(pidfdname) > sizeof(filename)) {
+		/* Would overflow var filename. This should never happen... */
+		errno = EOVERFLOW;
+		return -1;
+	}
+
+	memcpy(filename, prefix, prefix_len);
+	/* Note: sizeof(pidfdname) includes the terminating zero byte, so filename
+	 * ends up properly terminated.
+	 */
+	memcpy(filename + prefix_len, pidfdname, sizeof(pidfdname));
+	return open(filename, O_RDWR | O_CREAT, S_IRUSR| S_IWUSR);
+}
+
+static int assert_only_one_xdpw_instance(void) {
+	int pidfd = open_pidfd();
+	if (-1 == pidfd) {
+		logprint(ERROR, "Failed to open pid file: %s\n", strerror(errno));
+		return -1;
+	}
+
+	if (flock(pidfd, LOCK_EX | LOCK_NB)) {
+		if (EWOULDBLOCK == errno) {
+			char other_inst[16];
+			ssize_t len = read(pidfd, other_inst, sizeof(other_inst) - 1);
+			if (len == -1) {
+				logprint(ERROR, "Another instance is already running\n");
+			} else {
+				other_inst[len] = '\0';
+				logprint(ERROR, "Another instance is already running with "
+				         "pid %s\n", other_inst);
+			}
+		} else {
+			logprint(ERROR, "Failed to lock pid file: %s\n", strerror(errno));
+		}
+		return -1;
+	}
+
+	{
+		char pid[16];
+		int len = sprintf(pid, "%d", (int)getpid());
+		write(pidfd, pid, len);
+		fsync(pidfd);
+	}
+
+	return 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -63,6 +121,10 @@ int main(int argc, char *argv[]) {
 	}
 
 	init_logger(stderr, loglevel);
+
+	if (assert_only_one_xdpw_instance()) {
+		return EXIT_FAILURE;
+	}
 
 	int ret = 0;
 
