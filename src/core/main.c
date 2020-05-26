@@ -4,6 +4,7 @@
 #include <getopt.h>
 #include <poll.h>
 #include <pipewire/pipewire.h>
+#include <signal.h>
 #include <spa/utils/result.h>
 #include <sys/file.h>
 #include <sys/types.h>
@@ -27,6 +28,7 @@ static int xdpw_usage(FILE* stream, int rc) {
 		"                                     QUIET, ERROR, WARN, INFO, DEBUG, TRACE\n"
 		"    -o, --output=<name>              Select output to capture.\n"
 		"                                     metadata (performs no conversion).\n"
+		"    -r, --replace                    Replace a running instance.\n"
 		"    -h, --help                       Get help (this text).\n"
 		"\n";
 
@@ -55,7 +57,7 @@ static int open_pidfd(void) {
 	return open(filename, O_RDWR | O_CREAT, S_IRUSR| S_IWUSR);
 }
 
-static int assert_only_one_xdpw_instance(void) {
+static int assert_only_one_xdpw_instance(int replace_existing) {
 	int pidfd = open_pidfd();
 	if (-1 == pidfd) {
 		logprint(ERROR, "Failed to open pid file: %s\n", strerror(errno));
@@ -70,6 +72,14 @@ static int assert_only_one_xdpw_instance(void) {
 				logprint(ERROR, "Another instance is already running\n");
 			} else {
 				other_inst[len] = '\0';
+				if (replace_existing) {
+					pid_t other_pid = atoi(other_inst);
+					kill(other_pid, SIGTERM);
+					sleep(1);
+					kill(other_pid, SIGKILL);
+					close(pidfd);
+					return assert_only_one_xdpw_instance(0);
+				}
 				logprint(ERROR, "Another instance is already running with "
 				         "pid %s\n", other_inst);
 			}
@@ -82,8 +92,10 @@ static int assert_only_one_xdpw_instance(void) {
 	{
 		char pid[16];
 		int len = sprintf(pid, "%d", (int)getpid());
-		write(pidfd, pid, len);
-		fsync(pidfd);
+		if (ftruncate(pidfd, 0) || (write(pidfd, pid, len) == -1) || fsync(pidfd)) {
+			logprint(ERROR, "Failed to write to pid file: %s\n",
+			         strerror(errno));
+		}
 	}
 
 	return 0;
@@ -92,11 +104,13 @@ static int assert_only_one_xdpw_instance(void) {
 int main(int argc, char *argv[]) {
 	const char* output_name = NULL;
 	enum LOGLEVEL loglevel = ERROR;
+	int replace_existing = 0;
 
-	static const char* shortopts = "l:o:h";
+	static const char* shortopts = "l:o:rh";
 	static const struct option longopts[] = {
 		{ "loglevel", required_argument, NULL, 'l' },
 		{ "output", required_argument, NULL, 'o' },
+		{ "replace", no_argument, NULL, 'r' },
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 }
 	};
@@ -113,6 +127,9 @@ int main(int argc, char *argv[]) {
 		case 'o':
 			output_name = optarg;
 			break;
+		case 'r':
+			replace_existing = 1;
+			break;
 		case 'h':
 			return xdpw_usage(stdout, EXIT_SUCCESS);
 		default:
@@ -122,7 +139,7 @@ int main(int argc, char *argv[]) {
 
 	init_logger(stderr, loglevel);
 
-	if (assert_only_one_xdpw_instance()) {
+	if (assert_only_one_xdpw_instance(replace_existing)) {
 		return EXIT_FAILURE;
 	}
 
